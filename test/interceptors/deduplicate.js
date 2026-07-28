@@ -3,7 +3,7 @@
 const { createServer } = require('node:http')
 const { describe, test, after } = require('node:test')
 const { once } = require('node:events')
-const { strictEqual, notStrictEqual } = require('node:assert')
+const { strictEqual, notStrictEqual, rejects } = require('node:assert')
 const { setTimeout: sleep } = require('node:timers/promises')
 const diagnosticsChannel = require('node:diagnostics_channel')
 const { Client, interceptors } = require('../../index')
@@ -1269,6 +1269,127 @@ describe('Deduplicate Interceptor', () => {
     strictEqual(requestsToOrigin, 1)
     strictEqual(primaryBody.byteLength, chunk.length * totalChunks)
     strictEqual(waitingHandlerErr.code, 'UND_ERR_ABORTED')
+  })
+
+  test('delivers the response to deduplicated requests when the first request is aborted', async () => {
+    let requestsToOrigin = 0
+    const server = createServer({ joinDuplicateHeaders: true }, async (req, res) => {
+      requestsToOrigin++
+      await sleep(200)
+      res.end('response-body')
+    }).listen(0)
+
+    const client = new Client(`http://localhost:${server.address().port}`)
+      .compose(interceptors.deduplicate())
+
+    after(async () => {
+      server.close()
+      await client.close()
+    })
+
+    await once(server, 'listening')
+
+    const request = {
+      origin: 'localhost',
+      method: 'GET',
+      path: '/'
+    }
+
+    const controller = new AbortController()
+    const abortedResponsePromise = client.request({ ...request, signal: controller.signal })
+    const waitingResponsePromise = client.request(request)
+
+    // Give the second request time to attach to the in-flight first one.
+    await sleep(50)
+    controller.abort()
+
+    await rejects(abortedResponsePromise, { name: 'AbortError' })
+
+    const waitingResponse = await waitingResponsePromise
+
+    strictEqual(requestsToOrigin, 1)
+    strictEqual(waitingResponse.statusCode, 200)
+    strictEqual(await waitingResponse.body.text(), 'response-body')
+  })
+
+  test('does not truncate deduplicated responses when the first request is aborted mid-body', async () => {
+    let requestsToOrigin = 0
+    const server = createServer({ joinDuplicateHeaders: true }, async (req, res) => {
+      requestsToOrigin++
+      res.write('chunk-1')
+      await sleep(100)
+      res.end('chunk-2')
+    }).listen(0)
+
+    const client = new Client(`http://localhost:${server.address().port}`)
+      .compose(interceptors.deduplicate())
+
+    after(async () => {
+      server.close()
+      await client.close()
+    })
+
+    await once(server, 'listening')
+
+    const request = {
+      origin: 'localhost',
+      method: 'GET',
+      path: '/'
+    }
+
+    const controller = new AbortController()
+    const abortedResponsePromise = client.request({ ...request, signal: controller.signal })
+    const waitingResponsePromise = client.request(request)
+
+    const abortedResponse = await abortedResponsePromise
+    const waitingResponse = await waitingResponsePromise
+
+    // Abort the first request after the shared response body started flowing.
+    await once(abortedResponse.body, 'readable')
+    controller.abort()
+    abortedResponse.body.on('error', () => {})
+
+    strictEqual(requestsToOrigin, 1)
+    strictEqual(waitingResponse.statusCode, 200)
+    strictEqual(await waitingResponse.body.text(), 'chunk-1chunk-2')
+  })
+
+  test('aborts the upstream request when the only caller aborts', async () => {
+    let requestsToOrigin = 0
+    let resolveResponseClosed
+    const responseClosed = new Promise(resolve => { resolveResponseClosed = resolve })
+
+    const server = createServer({ joinDuplicateHeaders: true }, (req, res) => {
+      requestsToOrigin++
+      res.on('close', () => resolveResponseClosed(res.writableFinished))
+      // Never respond, the request is expected to be torn down by the client.
+    }).listen(0)
+
+    const client = new Client(`http://localhost:${server.address().port}`)
+      .compose(interceptors.deduplicate())
+
+    after(async () => {
+      server.close()
+      await client.close()
+    })
+
+    await once(server, 'listening')
+
+    const controller = new AbortController()
+    const abortedResponsePromise = client.request({
+      origin: 'localhost',
+      method: 'GET',
+      path: '/',
+      signal: controller.signal
+    })
+
+    await sleep(50)
+    controller.abort()
+
+    await rejects(abortedResponsePromise, { name: 'AbortError' })
+
+    strictEqual(requestsToOrigin, 1)
+    strictEqual(await responseClosed, false)
   })
 
   test('throws TypeError if maxBufferSize is not a positive finite number', () => {
