@@ -121,3 +121,81 @@ test('Agent should successfully follow cross-origin redirect', async (t) => {
 
   await t.completed
 })
+
+test('Agent should follow a redirect chain that revisits an earlier URL', async (t) => {
+  t = tspl(t, { plan: 2 })
+
+  let appRequests = 0
+
+  const server = createServer((req, res) => {
+    if (req.url === '/app') {
+      if (++appRequests === 1) {
+        res.writeHead(302, { Location: '/login' })
+        res.end()
+      } else {
+        res.writeHead(200, { 'content-type': 'text/plain' })
+        res.end('App content')
+      }
+    } else {
+      res.writeHead(302, { Location: '/app' })
+      res.end()
+    }
+  })
+
+  server.listen(0)
+  after(() => server.close())
+  await once(server, 'listening')
+
+  const agent = new undici.Agent().compose(
+    redirect({ maxRedirections: 5 })
+  )
+  after(() => agent.close())
+
+  const response = await agent.request({
+    origin: `http://localhost:${server.address().port}`,
+    method: 'GET',
+    path: '/app'
+  })
+
+  const body = await response.body.text()
+
+  t.strictEqual(response.statusCode, 200, 'Response has 200 status code')
+  t.ok(body.includes('App content'), 'Session bounce back to the original URL is followed')
+
+  await t.completed
+})
+
+test('Agent should follow a 303 whose Location is the same URL', async (t) => {
+  t = tspl(t, { plan: 2 })
+
+  const server = createServer((req, res) => {
+    if (req.method === 'POST') {
+      res.writeHead(303, { Location: '/form' })
+      res.end()
+    } else {
+      res.writeHead(200, { 'content-type': 'text/plain' })
+      res.end('Form page')
+    }
+  })
+
+  server.listen(0)
+  after(() => server.close())
+  await once(server, 'listening')
+
+  const agent = new undici.Agent().compose(
+    redirect({ maxRedirections: 5 })
+  )
+  after(() => agent.close())
+
+  const response = await agent.request({
+    origin: `http://localhost:${server.address().port}`,
+    method: 'POST',
+    path: '/form',
+    body: 'a=1'
+  })
+
+  const body = await response.body.text()
+
+  t.strictEqual(response.statusCode, 200, 'Response has 200 status code')
+  t.ok(body.includes('Form page'), 'Post/Redirect/Get to the same path is followed')
+})
