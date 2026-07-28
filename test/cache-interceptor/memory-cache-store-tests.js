@@ -1,7 +1,7 @@
 'use strict'
 
 const { test } = require('node:test')
-const { equal } = require('node:assert')
+const { equal, ok } = require('node:assert')
 const MemoryCacheStore = require('../../lib/cache/memory-cache-store')
 const { cacheStoreTests } = require('./cache-store-test-utils.js')
 
@@ -93,7 +93,7 @@ test('isFull returns false when under limits', () => {
 test('isFull returns true when maxSize reached', async () => {
   const maxSize = 10
   const store = new MemoryCacheStore({ maxSize })
-  const testData = 'x'.repeat(maxSize + 1) // Exceed maxSize
+  const testData = 'x'.repeat(maxSize) // Reach maxSize
 
   const writeStream = store.createWriteStream(
     { origin: 'test', path: '/', method: 'GET' },
@@ -110,7 +110,7 @@ test('isFull returns true when maxSize reached', async () => {
   writeStream.write(testData)
   writeStream.end()
 
-  equal(store.isFull(), true, 'Should be full when maxSize exceeded')
+  equal(store.isFull(), true, 'Should be full when maxSize reached')
 })
 
 test('isFull returns true when maxCount reached', async () => {
@@ -134,6 +134,57 @@ test('isFull returns true when maxCount reached', async () => {
   }
 
   equal(store.isFull(), true, 'Should be full when maxCount exceeded')
+})
+
+test('evicts entries when maxCount is exceeded', async () => {
+  const maxCount = 10
+  const store = new MemoryCacheStore({ maxCount })
+
+  for (let i = 0; i < 100; i++) {
+    const writeStream = store.createWriteStream(
+      { origin: 'test', path: `/${i}`, method: 'GET' },
+      {
+        statusCode: 200,
+        statusMessage: 'OK',
+        headers: {},
+        cachedAt: Date.now(),
+        staleAt: Date.now() + 60000,
+        deleteAt: Date.now() + 120000
+      }
+    )
+    writeStream.end('test')
+  }
+
+  let stored = 0
+  for (let i = 0; i < 100; i++) {
+    if (store.get({ origin: 'test', path: `/${i}`, method: 'GET', headers: {} })) {
+      stored++
+    }
+  }
+
+  ok(stored <= maxCount, `expected at most maxCount=${maxCount} stored entries, got ${stored}`)
+})
+
+test('evicts entries when maxSize is exceeded', async () => {
+  const maxSize = 100
+  const store = new MemoryCacheStore({ maxSize })
+
+  for (let i = 0; i < 20; i++) {
+    const writeStream = store.createWriteStream(
+      { origin: 'test', path: `/${i}`, method: 'GET' },
+      {
+        statusCode: 200,
+        statusMessage: 'OK',
+        headers: {},
+        cachedAt: Date.now(),
+        staleAt: Date.now() + 60000,
+        deleteAt: Date.now() + 120000
+      }
+    )
+    writeStream.end('x'.repeat(10))
+  }
+
+  ok(store.size <= maxSize, `expected at most maxSize=${maxSize} bytes stored, got ${store.size}`)
 })
 
 test('emits maxSizeExceeded event when limits exceeded', async () => {
