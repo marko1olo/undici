@@ -2649,6 +2649,120 @@ describe('Cache Interceptor', () => {
       }
     })
 
+    test('only-if-cached serves a stale stored response without revalidating', async () => {
+      const clock = FakeTimers.install({
+        toFake: ['Date']
+      })
+
+      let requestsToOrigin = 0
+      let revalidationRequests = 0
+      const server = createServer({ joinDuplicateHeaders: true }, (req, res) => {
+        requestsToOrigin++
+        res.setHeader('date', 0)
+        res.setHeader('cache-control', 'public, max-age=1')
+        res.setHeader('etag', '"asd"')
+
+        if (req.headers['if-none-match']) {
+          revalidationRequests++
+          res.statusCode = 304
+          res.end()
+        } else {
+          res.end('asd')
+        }
+      }).listen(0)
+
+      const client = new Client(`http://localhost:${server.address().port}`)
+        .compose(interceptors.cache())
+
+      after(async () => {
+        clock.uninstall()
+        server.close()
+        await client.close()
+      })
+
+      await once(server, 'listening')
+
+      /**
+       * @type {import('../../types/dispatcher').default.RequestOptions}
+       */
+      const request = {
+        origin: 'localhost',
+        method: 'GET',
+        path: '/'
+      }
+
+      await client.request(request)
+      equal(requestsToOrigin, 1)
+
+      clock.tick(1500)
+
+      // The stored response is stale, but only-if-cached forbids contacting the
+      //  origin, so it has to be served as-is
+      {
+        const res = await client.request({
+          ...request,
+          headers: {
+            'cache-control': 'only-if-cached'
+          }
+        })
+        equal(requestsToOrigin, 1)
+        equal(revalidationRequests, 0)
+        equal(res.statusCode, 200)
+        strictEqual(await res.body.text(), 'asd')
+      }
+    })
+
+    test('only-if-cached returns 504 when the stored response cannot be reused without revalidation', async () => {
+      const clock = FakeTimers.install({
+        toFake: ['Date']
+      })
+
+      try {
+        for (const directive of ['must-revalidate', 'proxy-revalidate', 's-maxage=1']) {
+          let requestsToOrigin = 0
+          const server = createServer({ joinDuplicateHeaders: true }, (_, res) => {
+            requestsToOrigin++
+            res.setHeader('date', 0)
+            res.setHeader('cache-control', `public, max-age=1, ${directive}`)
+            res.setHeader('etag', '"asd"')
+            res.end('asd')
+          }).listen(0)
+
+          await once(server, 'listening')
+
+          const client = new Client(`http://localhost:${server.address().port}`)
+            .compose(interceptors.cache())
+
+          try {
+            const request = {
+              origin: 'localhost',
+              method: 'GET',
+              path: '/'
+            }
+
+            await client.request(request)
+            equal(requestsToOrigin, 1, directive)
+
+            clock.tick(1500)
+
+            const res = await client.request({
+              ...request,
+              headers: {
+                'cache-control': 'only-if-cached'
+              }
+            })
+            equal(requestsToOrigin, 1, directive)
+            equal(res.statusCode, 504, directive)
+          } finally {
+            await client.close()
+            await new Promise(resolve => server.close(resolve))
+          }
+        }
+      } finally {
+        clock.uninstall()
+      }
+    })
+
     test('stale-if-error', async () => {
       const clock = FakeTimers.install({
         toFake: ['Date']
