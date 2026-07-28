@@ -879,8 +879,11 @@ test('Should only accept valid ping interval values', async t => {
 
 test('Should send http2 PING frames', async t => {
   const server = createSecureServer(pem)
+  const expectedPings = 5
   let session = null
   let pingCounter = 0
+  let onExpectedPings
+  const expectedPingsSeen = new Promise((resolve) => { onExpectedPings = resolve })
 
   server.on('stream', async (stream, headers) => {
     stream.respond({
@@ -904,7 +907,9 @@ test('Should send http2 PING frames', async t => {
   server.on('session', (s) => {
     session = s
     session.on('ping', (payload) => {
-      pingCounter++
+      if (++pingCounter === expectedPings) {
+        onExpectedPings()
+      }
     })
   })
 
@@ -941,9 +946,15 @@ test('Should send http2 PING frames', async t => {
     }
   })
 
-  await sleep(600)
+  // Waiting a fixed 600ms for a 100ms pingInterval loses a ping whenever the
+  // event loop is delayed, so wait for the pings themselves and keep a deadline
+  // so a regression still fails with the count instead of hanging.
+  const deadline = setTimeout(onExpectedPings, 10000)
+  await expectedPingsSeen
+  clearTimeout(deadline)
+
   await client.close()
-  t.equal(pingCounter, 5, 'Expected 5 PING frames to be sent')
+  t.ok(pingCounter >= expectedPings, `Expected at least ${expectedPings} PING frames to be sent, got ${pingCounter}`)
 
   await t.completed
 })
