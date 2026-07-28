@@ -1271,6 +1271,93 @@ describe('Deduplicate Interceptor', () => {
     strictEqual(waitingHandlerErr.code, 'UND_ERR_ABORTED')
   })
 
+  test('aborting a deduplicated request rejects it', async () => {
+    let requestsToOrigin = 0
+    const server = createServer({ joinDuplicateHeaders: true }, async (req, res) => {
+      requestsToOrigin++
+      await sleep(200)
+      res.end('response-body')
+    }).listen(0)
+
+    const client = new Client(`http://localhost:${server.address().port}`)
+      .compose(interceptors.deduplicate())
+
+    after(async () => {
+      server.close()
+      await client.close()
+    })
+
+    await once(server, 'listening')
+
+    const request = {
+      origin: 'localhost',
+      method: 'GET',
+      path: '/'
+    }
+
+    const primaryResponsePromise = client.request(request)
+
+    const ac = new AbortController()
+    const deduplicatedResponsePromise = client.request({ ...request, signal: ac.signal })
+
+    await sleep(50)
+    ac.abort()
+
+    const deduplicatedErr = await Promise.race([
+      deduplicatedResponsePromise.then(() => null, err => err),
+      sleep(1000).then(() => { throw new Error('deduplicated request never settled') })
+    ])
+
+    strictEqual(deduplicatedErr.name, 'AbortError')
+
+    const primaryResponse = await primaryResponsePromise
+
+    strictEqual(requestsToOrigin, 1)
+    strictEqual(await primaryResponse.body.text(), 'response-body')
+  })
+
+  test('deduplicating a request with an already aborted signal rejects it', async () => {
+    let requestsToOrigin = 0
+    const server = createServer({ joinDuplicateHeaders: true }, async (req, res) => {
+      requestsToOrigin++
+      await sleep(100)
+      res.end('response-body')
+    }).listen(0)
+
+    const client = new Client(`http://localhost:${server.address().port}`)
+      .compose(interceptors.deduplicate())
+
+    after(async () => {
+      server.close()
+      await client.close()
+    })
+
+    await once(server, 'listening')
+
+    const request = {
+      origin: 'localhost',
+      method: 'GET',
+      path: '/'
+    }
+
+    const primaryResponsePromise = client.request(request)
+
+    const ac = new AbortController()
+    ac.abort()
+
+    const deduplicatedErr = await Promise.race([
+      client.request({ ...request, signal: ac.signal }).then(() => null, err => err),
+      sleep(1000).then(() => { throw new Error('deduplicated request never settled') })
+    ])
+
+    strictEqual(deduplicatedErr.name, 'AbortError')
+
+    const primaryResponse = await primaryResponsePromise
+
+    strictEqual(requestsToOrigin, 1)
+    strictEqual(await primaryResponse.body.text(), 'response-body')
+  })
+
   test('throws TypeError if maxBufferSize is not a positive finite number', () => {
     const { throws } = require('node:assert')
     throws(() => {
