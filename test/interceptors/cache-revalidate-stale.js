@@ -4,7 +4,8 @@ const { test, after, describe } = require('node:test')
 const { strictEqual } = require('node:assert')
 const { createServer } = require('node:http')
 const { once } = require('node:events')
-const { request, Client, interceptors } = require('../../index')
+const { request, Client, interceptors, cacheStores: { SqliteCacheStore } } = require('../../index')
+const { runtimeFeatures } = require('../../lib/util/runtime-features.js')
 const FakeTimers = require('@sinonjs/fake-timers')
 const { setTimeout } = require('node:timers/promises')
 
@@ -74,7 +75,7 @@ describe('revalidates the request, handles 304s during stale-while-revalidate', 
     return res.headers.warning === '110 - "response is stale"'
   }
 
-  async function revalidateTest (useEtag = false) {
+  async function revalidateTest (useEtag = false, store = undefined) {
     const clock = FakeTimers.install({
       now: 1
     })
@@ -105,11 +106,12 @@ describe('revalidates the request, handles 304s during stale-while-revalidate', 
     await once(server, 'listening')
 
     const dispatcher = new Client(`http://localhost:${server.address().port}`)
-      .compose(interceptors.cache())
+      .compose(interceptors.cache({ store }))
 
     after(async () => {
       server.close()
       await dispatcher.close()
+      store?.close?.()
     })
 
     const url = `http://localhost:${server.address().port}`
@@ -156,4 +158,7 @@ describe('revalidates the request, handles 304s during stale-while-revalidate', 
 
   test('using if-none-match', async () => await revalidateTest(true))
   test('using if-modified-since', async () => await revalidateTest(false))
+  // SqliteCacheStore returns the body as a Buffer rather than an array of chunks
+  test('using if-none-match with SqliteCacheStore', { skip: runtimeFeatures.has('sqlite') === false }, async () => await revalidateTest(true, new SqliteCacheStore()))
+  test('using if-modified-since with SqliteCacheStore', { skip: runtimeFeatures.has('sqlite') === false }, async () => await revalidateTest(false, new SqliteCacheStore()))
 })
