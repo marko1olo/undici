@@ -3,7 +3,7 @@
 const { createServer } = require('node:http')
 const { describe, test, after } = require('node:test')
 const { once } = require('node:events')
-const { strictEqual, notStrictEqual } = require('node:assert')
+const { strictEqual, notStrictEqual, deepStrictEqual } = require('node:assert')
 const { setTimeout: sleep } = require('node:timers/promises')
 const diagnosticsChannel = require('node:diagnostics_channel')
 const { Client, interceptors } = require('../../index')
@@ -453,6 +453,111 @@ describe('Deduplicate Interceptor', () => {
 
     strictEqual(body1, 'response')
     strictEqual(body2, 'response')
+  })
+
+  test('deduplicated handlers receive the raw response headers', async () => {
+    let requestsToOrigin = 0
+    const server = createServer({ joinDuplicateHeaders: true }, async (req, res) => {
+      requestsToOrigin++
+      await sleep(100)
+      res.setHeader('X-Custom-Header', 'custom-value')
+      res.end('response-body')
+    }).listen(0)
+
+    const client = new Client(`http://localhost:${server.address().port}`)
+      .compose(interceptors.deduplicate())
+
+    after(async () => {
+      server.close()
+      await client.close()
+    })
+
+    await once(server, 'listening')
+
+    const request = {
+      origin: 'localhost',
+      method: 'GET',
+      path: '/',
+      responseHeaders: 'raw'
+    }
+
+    const [res1, res2] = await Promise.all([
+      client.request(request),
+      client.request(request)
+    ])
+
+    strictEqual(requestsToOrigin, 1)
+
+    // Every caller gets the same raw headers, with the casing sent by the origin
+    deepStrictEqual(res1.headers, res2.headers)
+    strictEqual(res2.headers[res2.headers.indexOf('X-Custom-Header') + 1], 'custom-value')
+
+    const [body1, body2] = await Promise.all([
+      res1.body.text(),
+      res2.body.text()
+    ])
+
+    strictEqual(body1, 'response-body')
+    strictEqual(body2, 'response-body')
+  })
+
+  test('deduplicated handlers receive the raw response trailers', async () => {
+    let requestsToOrigin = 0
+    const server = createServer({ joinDuplicateHeaders: true }, async (req, res) => {
+      requestsToOrigin++
+      await sleep(100)
+      res.addTrailers({ 'Content-MD5': 'test' })
+      res.setHeader('Trailer', 'Content-MD5')
+      res.end('response-body')
+    }).listen(0)
+
+    const client = new Client(`http://localhost:${server.address().port}`)
+      .compose(interceptors.deduplicate())
+
+    after(async () => {
+      server.close()
+      await client.close()
+    })
+
+    await once(server, 'listening')
+
+    const request = {
+      origin: 'localhost',
+      method: 'GET',
+      path: '/'
+    }
+
+    let rawHeaders = null
+    let rawTrailers = null
+
+    const primary = client.request(request)
+    const waiting = new Promise((resolve, reject) => {
+      client.dispatch(request, {
+        onRequestStart () {},
+        onResponseStart (controller) {
+          rawHeaders = controller.rawHeaders
+        },
+        onResponseData () {},
+        onResponseEnd (controller) {
+          rawTrailers = controller.rawTrailers
+          resolve()
+        },
+        onResponseError (_controller, err) {
+          reject(err)
+        }
+      })
+    })
+
+    const res = await primary
+    strictEqual(await res.body.text(), 'response-body')
+    await waiting
+
+    strictEqual(requestsToOrigin, 1)
+    strictEqual(Array.isArray(rawHeaders), true)
+    strictEqual(Array.isArray(rawTrailers), true)
+
+    const trailerIndex = rawTrailers.findIndex(x => x.toString() === 'Content-MD5')
+    strictEqual(rawTrailers[trailerIndex + 1].toString(), 'test')
   })
 
   test('diagnostic channel tracks pending requests correctly', async () => {
