@@ -705,6 +705,46 @@ test('should decompress multiple encodings in correct order', async t => {
   await t.completed
 })
 
+test('should decompress repeated content-encoding field lines', async t => {
+  t = tspl(t, { plan: 3 })
+
+  const data = 'Repeated field line test message'
+  const server = createServer({ joinDuplicateHeaders: true }, (req, res) => {
+    res.writeHead(200, {
+      'Content-Type': 'text/plain',
+      'Content-Encoding': ['gzip', 'gzip'] // Sent as two Content-Encoding field lines
+    })
+
+    res.end(gzipSync(gzipSync(data)))
+  })
+
+  server.listen(0)
+  await once(server, 'listening')
+
+  const client = new Client(
+    `http://localhost:${server.address().port}`
+  ).compose(createDecompressInterceptor())
+
+  after(async () => {
+    await client.close()
+    server.close()
+    await once(server, 'close')
+  })
+
+  const response = await client.request({
+    method: 'GET',
+    path: '/'
+  })
+
+  const body = await response.body.text()
+
+  t.equal(response.statusCode, 200)
+  t.equal(response.headers['content-encoding'], undefined) // Should be removed
+  t.equal(body, data) // Should be fully decompressed
+
+  await t.completed
+})
+
 test('should handle legacy encoding names (x-gzip)', async t => {
   t = tspl(t, { plan: 3 })
 
