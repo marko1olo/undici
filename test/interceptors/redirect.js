@@ -19,7 +19,7 @@ const {
 const { createReadable, createReadableStream } = require('../utils/stream')
 
 const {
-  interceptors: { redirect }
+  interceptors: { redirect, retry }
 } = undici
 
 for (const factory of [
@@ -810,6 +810,94 @@ test('should redirect to relative URL according to RFC 7231', async t => {
 
   t.strictEqual(statusCode, 200)
   t.strictEqual(finalPath, '/absolute/b')
+})
+
+// Client#request and Pool#request do not put an origin in the dispatch options,
+// so these exercise the redirect handler with opts.origin undefined on the first
+// hop. The Agent case is the reference: it passes an origin and already behaved
+// this way.
+const dispatchersWithoutOrigin = (server, maxRedirections) => [
+  () => [
+    new undici.Client(`http://${server}`).compose(redirect({ maxRedirections })),
+    { method: 'GET', path: '/302' }
+  ],
+  () => [
+    new undici.Pool(`http://${server}`).compose(redirect({ maxRedirections })),
+    { method: 'GET', path: '/302' }
+  ],
+  // the redirect handler is handed the retry handler's controller here
+  () => [
+    new undici.Client(`http://${server}`).compose(retry(), redirect({ maxRedirections })),
+    { method: 'GET', path: '/302' }
+  ],
+  () => [
+    new undici.Agent().compose(redirect({ maxRedirections })),
+    { origin: `http://${server}`, method: 'GET', path: '/302' }
+  ]
+]
+
+test('should record the first hop in history when dispatched without an origin', async t => {
+  t = tspl(t, { plan: 8 })
+
+  const server = await startRedirectingServer()
+
+  const expected = [
+    `http://${server}/302`,
+    `http://${server}/302/1`,
+    `http://${server}/302/2`,
+    `http://${server}/302/3`,
+    `http://${server}/302/4`,
+    `http://${server}/302/5`
+  ]
+
+  for (const factory of dispatchersWithoutOrigin(server, 10)) {
+    const [dispatcher, opts] = factory()
+    after(() => dispatcher.close())
+
+    const {
+      statusCode,
+      body,
+      context: { history }
+    } = await dispatcher.request(opts)
+
+    await body.dump()
+
+    t.strictEqual(statusCode, 200)
+    t.deepStrictEqual(history.map(x => x.toString()), expected)
+  }
+
+  await t.completed
+})
+
+test('should count the first hop against maxRedirections when dispatched without an origin', async t => {
+  t = tspl(t, { plan: 12 })
+
+  const server = await startRedirectingServer()
+
+  for (const factory of dispatchersWithoutOrigin(server, 1)) {
+    const [dispatcher, opts] = factory()
+    after(() => dispatcher.close())
+
+    const {
+      statusCode,
+      headers,
+      body,
+      context: { history }
+    } = await dispatcher.request(opts)
+
+    await body.dump()
+
+    // Exactly one redirect was followed, so the response handed back is the 302
+    // served at /302/1, pointing at /302/2. Two hops would surface /302/3.
+    t.strictEqual(statusCode, 302)
+    t.strictEqual(headers.location, `http://${server}/302/2`)
+    t.deepStrictEqual(history.map(x => x.toString()), [
+      `http://${server}/302`,
+      `http://${server}/302/1`
+    ])
+  }
+
+  await t.completed
 })
 
 test('same-origin redirect preserves plain object headers with polluted Object.prototype[Symbol.iterator]', async (t) => {

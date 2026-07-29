@@ -319,7 +319,13 @@ test('Should pass context from other interceptors', async t => {
   const response = await client.request(requestOptions)
 
   t.equal(response.statusCode, 200)
-  t.deepStrictEqual(response.context, { history: [] })
+  // No redirect was followed, but the URL that was requested is still a hop, as
+  // 'should always have a history with the final URL even if no redirections
+  // were followed' asserts for the dispatchers that pass an origin in the
+  // dispatch options.
+  t.deepStrictEqual(response.context, {
+    history: [new URL(`http://localhost:${server.address().port}/`)]
+  })
 })
 
 test('Should handle 206 partial content', async t => {
