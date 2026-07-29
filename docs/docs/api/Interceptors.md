@@ -390,8 +390,9 @@ const agent = new Agent().compose(
 
 ## Composing multiple interceptors
 
-Interceptors are applied in the order they appear in the `compose()` call.
-The first interceptor in the array wraps the outermost layer.
+`compose()` wraps each interceptor around the ones before it, so the **last** interceptor in the array
+ends up as the outermost layer. A request travels inwards from the last entry to the first, and the
+response travels back out from the first to the last.
 
 ```js
 import { Agent, interceptors } from 'undici'
@@ -405,10 +406,13 @@ const agent = new Agent().compose([
 ])
 ```
 
-In the example above the request flow is:
+In the example above the request reaches the interceptors in this order:
 
-1. **dns** — resolves and caches the target IP
-2. **retry** — retries the dispatch on transient failures
+1. **responseError** — converts 4xx/5xx into thrown errors
+2. **decompress** — decompresses the response body
 3. **redirect** — follows any 3xx redirects
-4. **decompress** — decompresses the response body
-5. **responseError** — converts 4xx/5xx into thrown errors
+4. **retry** — retries the dispatch on transient failures
+5. **dns** — resolves and caches the target IP
+
+and the response passes back through them in the reverse order, so `dns` sees it first and
+`responseError` last.
