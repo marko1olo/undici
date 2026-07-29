@@ -433,8 +433,70 @@ describe('MockInterceptor - replyContentLength', () => {
       path: '',
       method: ''
     }, [])
-    const result = mockInterceptor.defaultReplyTrailers({})
+    const result = mockInterceptor.replyContentLength()
     t.assert.ok(result instanceof MockInterceptor)
+  })
+
+  test('should count utf-8 bytes and not characters for a string body', async t => {
+    t.plan(2)
+
+    const baseUrl = 'http://localhost:9999'
+    const mockAgent = new MockAgent()
+    mockAgent.disableNetConnect()
+    after(() => mockAgent.close())
+
+    const mockPool = mockAgent.get(baseUrl)
+
+    // 'é' and 'ö' are two bytes each, so this body is 13 bytes for 11 characters.
+    mockPool.intercept({
+      path: '/test',
+      method: 'GET'
+    }).replyContentLength().reply(200, 'héllo wörld')
+
+    const { headers, body } = await request(`${baseUrl}/test`, { dispatcher: mockAgent })
+    t.assert.strictEqual(headers['content-length'], '13')
+    t.assert.strictEqual(await body.text(), 'héllo wörld')
+  })
+
+  test('should count utf-8 bytes and not characters for an object body', async t => {
+    t.plan(2)
+
+    const baseUrl = 'http://localhost:9999'
+    const mockAgent = new MockAgent()
+    mockAgent.disableNetConnect()
+    after(() => mockAgent.close())
+
+    const mockPool = mockAgent.get(baseUrl)
+
+    // Serializes to '{"name":"Ünïcödé"}': 18 characters, 22 bytes.
+    mockPool.intercept({
+      path: '/test',
+      method: 'GET'
+    }).replyContentLength().reply(200, { name: 'Ünïcödé' })
+
+    const { headers, body } = await request(`${baseUrl}/test`, { dispatcher: mockAgent })
+    t.assert.strictEqual(headers['content-length'], '22')
+    t.assert.deepStrictEqual(await body.json(), { name: 'Ünïcödé' })
+  })
+
+  test('should use the byte length of an ArrayBuffer body', async t => {
+    t.plan(2)
+
+    const baseUrl = 'http://localhost:9999'
+    const mockAgent = new MockAgent()
+    mockAgent.disableNetConnect()
+    after(() => mockAgent.close())
+
+    const mockPool = mockAgent.get(baseUrl)
+
+    mockPool.intercept({
+      path: '/test',
+      method: 'GET'
+    }).replyContentLength().reply(200, new TextEncoder().encode('abcdef').buffer)
+
+    const { headers, body } = await request(`${baseUrl}/test`, { dispatcher: mockAgent })
+    t.assert.strictEqual(headers['content-length'], '6')
+    t.assert.strictEqual(await body.text(), 'abcdef')
   })
 })
 
