@@ -19,7 +19,7 @@ const {
 const { createReadable, createReadableStream } = require('../utils/stream')
 
 const {
-  interceptors: { redirect }
+  interceptors: { redirect, retry }
 } = undici
 
 for (const factory of [
@@ -810,6 +810,67 @@ test('should redirect to relative URL according to RFC 7231', async t => {
 
   t.strictEqual(statusCode, 200)
   t.strictEqual(finalPath, '/absolute/b')
+})
+
+test('should redirect to relative URL when dispatched without an origin', async t => {
+  t = tspl(t, { plan: 6 })
+
+  const server = await startRedirectingWithRelativePath()
+
+  for (const factory of [
+    () => new undici.Client(`http://${server}`).compose(redirect({ maxRedirections: 3 })),
+    () => new undici.Pool(`http://${server}`).compose(redirect({ maxRedirections: 3 })),
+    // the redirect handler is handed the retry handler's controller here
+    () => new undici.Client(`http://${server}`).compose(retry(), redirect({ maxRedirections: 3 }))
+  ]) {
+    const dispatcher = factory()
+    after(() => dispatcher.close())
+
+    const { statusCode, body } = await dispatcher.request({ method: 'GET', path: '/' })
+
+    t.strictEqual(statusCode, 200)
+    t.strictEqual(await body.text(), '/absolute/b')
+  }
+
+  await t.completed
+})
+
+test('should keep same-origin headers on a relative redirect dispatched without an origin', async t => {
+  const { strictEqual } = tspl(t, { plan: 3 })
+
+  const server = createServer((req, res) => {
+    if (req.url === '/redirect') {
+      res.writeHead(302, {
+        Location: '/final'
+      })
+      res.end()
+      return
+    }
+
+    strictEqual(req.headers.authorization, 'secret')
+    strictEqual(req.headers.cookie, 'a=b')
+    res.end('redirected')
+  }).listen(0)
+
+  after(() => server.close())
+
+  await once(server, 'listening')
+
+  const client = new undici.Client(`http://localhost:${server.address().port}`).compose(
+    redirect({ maxRedirections: 1 })
+  )
+  after(() => client.close())
+
+  const res = await client.request({
+    method: 'GET',
+    path: '/redirect',
+    headers: {
+      authorization: 'secret',
+      cookie: 'a=b'
+    }
+  })
+
+  strictEqual(await res.body.text(), 'redirected')
 })
 
 test('same-origin redirect preserves plain object headers with polluted Object.prototype[Symbol.iterator]', async (t) => {

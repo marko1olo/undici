@@ -289,6 +289,8 @@ following shape:
 * `aborted` {boolean} Whether the request has been aborted.
 * `paused` {boolean} Whether the request is paused.
 * `reason` {Error|null} The reason the request was aborted, if any.
+* `origin` {string|null} The origin the request is sent to. Useful when the
+  dispatch options do not carry one, as with `Client` and `Pool`.
 * `rawHeaders` {Buffer[]|string[]|Object|null} The raw response headers,
   preserving duplicates and casing.
 * `rawTrailers` {Buffer[]|string[]|Object|null} The raw response trailers.
