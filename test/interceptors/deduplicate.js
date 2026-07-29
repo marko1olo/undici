@@ -1,6 +1,7 @@
 'use strict'
 
 const { createServer } = require('node:http')
+const { gzipSync } = require('node:zlib')
 const { describe, test, after } = require('node:test')
 const { once } = require('node:events')
 const { strictEqual, notStrictEqual, rejects } = require('node:assert')
@@ -10,6 +11,35 @@ const { Client, interceptors } = require('../../index')
 const { makeDeduplicationKey } = require('../../lib/util/cache')
 
 describe('Deduplicate Interceptor', () => {
+  test('lets an interceptor composed outside it rewrite the raw headers', async () => {
+    const payload = gzipSync(Buffer.from('compressed payload'))
+    const server = createServer({ joinDuplicateHeaders: true }, (req, res) => {
+      res.writeHead(200, {
+        'content-encoding': 'gzip',
+        'content-type': 'text/plain',
+        'content-length': String(payload.length)
+      })
+      res.end(payload)
+    })
+    after(() => server.close())
+
+    server.listen(0)
+    await once(server, 'listening')
+
+    // decompress() is the outer interceptor, so its handler is the one this handler
+    // reports the response to, and it rewrites controller.rawHeaders to drop
+    // content-encoding. The controller handed over has to accept that write.
+    const client = new Client(`http://localhost:${server.address().port}`)
+      .compose(interceptors.deduplicate(), interceptors.decompress())
+    after(() => client.close())
+
+    // origin has to be in the request options: deduplicate() bails out when opts.origin
+    // is absent, and Client#request does not set it. The tests above do the same.
+    const { statusCode, body } = await client.request({ origin: 'localhost', method: 'GET', path: '/' })
+    strictEqual(statusCode, 200)
+    strictEqual(await body.text(), 'compressed payload')
+  })
+
   test('deduplicates concurrent requests for the same resource', async () => {
     let requestsToOrigin = 0
     const server = createServer({ joinDuplicateHeaders: true }, async (req, res) => {
